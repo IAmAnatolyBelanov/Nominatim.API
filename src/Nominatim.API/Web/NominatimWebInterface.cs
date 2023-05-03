@@ -5,9 +5,11 @@ using System.Reflection;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Caching.Memory;
 using Newtonsoft.Json;
 using Nominatim.API.Contracts;
 using Nominatim.API.Interfaces;
+using Nominatim.API.Models;
 
 namespace Nominatim.API.Web {
     /// <summary>
@@ -28,15 +30,33 @@ namespace Nominatim.API.Web {
 
         private readonly ProductInfoHeaderValue _productInfoHeaderValue;
 
+        private readonly IMemoryCache _cache = null;
+        private readonly MemoryCacheEntryOptions _cacheEntryOptions = null;
+
         public NominatimWebInterface(
             IHttpClientFactory httpClientFactory,
             string httpClientName = "DefaultNominatimWebInterfaceHttpClient",
-            string productName = "f1ana.Nominatim.API") {
+            string productName = "f1ana.Nominatim.API",
+            NominatimCacheConfig cacheConfig = null) {
             _httpClientFactory = httpClientFactory;
             _httpClientName = httpClientName;
             _productName = productName;
 
             _productInfoHeaderValue = new ProductInfoHeaderValue(_productName, _version);
+
+            if (cacheConfig != null)
+            {
+                _cache = new MemoryCache(new MemoryCacheOptions
+                {
+                    SizeLimit = cacheConfig.CacheSize,
+                });
+
+                _cacheEntryOptions = new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = cacheConfig.CacheEntityLifespan,
+                    Size = 1,
+                };
+			}
         }
         
         /// <summary>
@@ -49,12 +69,22 @@ namespace Nominatim.API.Web {
         public async Task<T> GetRequest<T>(string url, Dictionary<string, string> parameters) {
             var req = addQueryStringToUrl(url, parameters);
 
+            if (_cache != null && _cache.TryGetValue<T>(req, out var cachedResult)){
+                return cachedResult;
+            }
+
             using (var httpClient = _httpClientFactory.CreateClient(_httpClientName))
             {
                 AddUserAgent(httpClient);
-                var result = await httpClient.GetStringAsync(req).ConfigureAwait(false);
+                var response = await httpClient.GetStringAsync(req).ConfigureAwait(false);
 
-                return JsonConvert.DeserializeObject<T>(result, _jsonSerializerSettings);
+                var result = JsonConvert.DeserializeObject<T>(response, _jsonSerializerSettings);
+
+                if (_cache != null){
+                    _cache.Set(req, result, _cacheEntryOptions);
+                }
+
+                return result;
             }
         }
 
