@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Reflection;
@@ -30,8 +31,10 @@ namespace Nominatim.API.Web {
 
         private readonly ProductInfoHeaderValue _productInfoHeaderValue;
 
-        private readonly IMemoryCache _cache = null;
-        private readonly MemoryCacheEntryOptions _cacheEntryOptions = null;
+        private readonly IMemoryCache _successCache = null;
+        private readonly IMemoryCache _errorsCache = null;
+        private readonly MemoryCacheEntryOptions _successCacheEntryOptions = null;
+        private readonly MemoryCacheEntryOptions _errorsCacheEntryOptions = null;
 
         public NominatimWebInterface(
             IHttpClientFactory httpClientFactory,
@@ -46,17 +49,28 @@ namespace Nominatim.API.Web {
 
             if (cacheConfig != null)
             {
-                _cache = new MemoryCache(new MemoryCacheOptions
+                _successCache = new MemoryCache(new MemoryCacheOptions
                 {
-                    SizeLimit = cacheConfig.CacheSize,
+                    SizeLimit = cacheConfig.SuccessCacheSize,
                 });
 
-                _cacheEntryOptions = new MemoryCacheEntryOptions
+                _successCacheEntryOptions = new MemoryCacheEntryOptions
                 {
-                    AbsoluteExpirationRelativeToNow = cacheConfig.CacheEntityLifespan,
+                    AbsoluteExpirationRelativeToNow = cacheConfig.SuccessCacheEntityLifespan,
                     Size = 1,
                 };
-			}
+
+                _errorsCache = new MemoryCache(new MemoryCacheOptions
+                {
+                    SizeLimit = cacheConfig.ErrorsCacheSize,
+                });
+
+                _errorsCacheEntryOptions = new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = cacheConfig.ErrorsCacheEntityLifespan,
+                    Size = 1,
+                };
+            }
         }
         
         /// <summary>
@@ -69,22 +83,34 @@ namespace Nominatim.API.Web {
         public async Task<T> GetRequest<T>(string url, Dictionary<string, string> parameters) {
             var req = addQueryStringToUrl(url, parameters);
 
-            if (_cache != null && _cache.TryGetValue<T>(req, out var cachedResult)){
+            if (_successCache != null && _successCache.TryGetValue<T>(req, out var cachedResult)){
                 return cachedResult;
+            }
+
+            if (_errorsCache != null && _errorsCache.TryGetValue(req, out _)){
+                throw new ArgumentException(paramName: nameof(req), message: $"Failed to send request '{req}' to Nominatim server. Cached error.");
             }
 
             using (var httpClient = _httpClientFactory.CreateClient(_httpClientName))
             {
-                AddUserAgent(httpClient);
-                var response = await httpClient.GetStringAsync(req).ConfigureAwait(false);
+                try{
+                    AddUserAgent(httpClient);
+                    var response = await httpClient.GetStringAsync(req).ConfigureAwait(false);
 
-                var result = JsonConvert.DeserializeObject<T>(response, _jsonSerializerSettings);
+                    var result = JsonConvert.DeserializeObject<T>(response, _jsonSerializerSettings);
 
-                if (_cache != null){
-                    _cache.Set(req, result, _cacheEntryOptions);
+                    if (_successCache != null){
+                        _successCache.Set(req, result, _successCacheEntryOptions);
+                    }
+
+                    return result;
+                } catch (Exception ex){
+                    if (_errorsCache != null){
+                        _errorsCache.Set(req, ex.Message, _errorsCacheEntryOptions);
+                    }
+
+                    throw new ArgumentException(paramName: nameof(req), message: $"Failed to send request '{req}' to Nominatim server.", innerException: ex);
                 }
-
-                return result;
             }
         }
 
